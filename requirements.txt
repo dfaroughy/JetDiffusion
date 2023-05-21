@@ -1,0 +1,14 @@
+torch
+nflows
+h5py
+numpy
+scipy
+pandas
+tables
+tqdm
+matplotlib
+seaborn
+scikit-learn
+argparse
+torchvision
+einops
