@@ -12,11 +12,13 @@ import h5py
 import pandas as pd
 
 from diffusion.utils.base import make_dir, copy_parser, save_arguments, shuffle
-from diffusion.models.flows.norm_flows import masked_autoregressive_flow, coupling_flow
-from diffusion.models.training import Model
-from diffusion.models.loss import neglogprob_loss
 from diffusion.data.transform import EventTransform 
 from diffusion.data.plots import jet_plot_routine
+
+from diffusion.models.training import Model
+from diffusion.models.diffusion.deep_architectures import ScoreNet
+from diffusion.models.diffusion.dynamics import driftlessSDE
+from diffusion.models.loss import denoising_loss
 
 sys.path.append("../")
 torch.set_default_dtype(torch.float64)
@@ -35,59 +37,45 @@ if __name__ == '__main__':
     make_dir(args.dir+'/plots', overwrite=True)
     with open(args.dir + '/inputs.json', 'r') as f: model_inputs = json.load(f)
     args = argparse.Namespace(**model_inputs)
-    args.activation = getattr(F, args.activation)
+
+    args.num_time_steps=1000
+
 
     #...get datasets
 
     file =  "./data/events_anomalydetection_v2.features_with_jet_constituents.h5"
     data = torch.tensor(pd.read_hdf(file).to_numpy())
-    data = torch.cat((data[:, :4], data[:, 7:11], data[:, -2:]), dim=1)  # d=9: (jet1, jet2, mjj, truth_label)
-    data = shuffle(data)
-    context, bckg_truth = train_test_split(data, test_size=0.5, random_state=2487162)
+    bckg = torch.cat((data[:, :4], data[:, 7:11], data[:, -2:]), dim=1)  # d=9: (jet1, jet2, mjj, truth_label)
+    bckg = shuffle(bckg)
 
     #...get SB events and preprocess data
 
-    bckg_truth = EventTransform(bckg_truth, args)
-    bckg_truth.get_truth(kind='background')
-    bckg_truth.get_signal_region()
-
-    context = EventTransform(context, args)
-    context.get_signal_region()
-    context.preprocess()
-
-    args.num_jets = context.num_jets
-    args.num_gen = context.num_jets
-    args.mean = context.mean.tolist()
-    args.std = context.std.tolist()
-    args.max = context.max.tolist()
-    args.min = context.min.tolist()
-    print("INFO: num context jets: {}".format(args.num_jets))
+    bckg = EventTransform(bckg, args)
+    # bckg.compute_mjj()
 
     #...define template model
 
-    if args.flow == 'MAF': flow = masked_autoregressive_flow(args)
-    elif args.flow == 'coupling': flow = coupling_flow(args)
-    flow = flow.to(args.device)
-    model = Model(flow, args) 
+    sde = driftlessSDE(args)
+    score = ScoreNet(args, marginal_prob=sde.marginal_prob)
+    model = Model(score, sde, args) 
 
     #...load model
 
-    model.load_state(path=args.workdir+'/best_model.pth')
+    model.load_state(path=args.workdir+'/best_score_model.pth')
 
     #...define template model
 
-    sample = model.sample(num_batches=10, context=context.mjj[:bckg_truth.num_jets])
-
+    sample = model.sample(num_samples=bckg.num_jets, num_batches=10)
     sample = torch.cat((sample, torch.zeros(sample.shape[0],1)), dim=1)
     sample = EventTransform(sample, args, convert_to_ptepm=False)
-    sample.mean = context.mean
-    sample.std = context.std
-    sample.min = context.min
-    sample.max = context.max
+    sample.mean = torch.tensor(args.mean)
+    sample.std = torch.tensor(args.std)
+    sample.min = torch.tensor(args.min)
+    sample.max = torch.tensor(args.max)
     sample.preprocess(reverse=True)
     sample.compute_mjj()
 
-    jet_plot_routine((sample.data, bckg_truth.data), 
+    jet_plot_routine((sample.data, bckg.data), 
                      title='jet features generated SR ', save_dir=args.workdir+'/plots')
 
 

@@ -14,7 +14,6 @@ class EventTransform:
         self.args = args
         self.data = data[:, :9]
         self.truth = data[:, -1]
-
         if convert_to_ptepm:
             self.data[:, :4] = em2ptepm(data[:, :4])    # input is in 'em' coords: (px,py,pz,m)
             self.data[:, 4:8] = em2ptepm(data[:, 4:8])   
