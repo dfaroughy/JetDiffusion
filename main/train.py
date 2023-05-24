@@ -28,11 +28,7 @@ torch.set_default_dtype(torch.float64)
 '''
     Description:
 
-    Normalizing flow (maf or coupling layer) for learning the 
-    features of the dijet distribution for lhco data. 
-
-    The flow generates context for a diffusion model for anomaly detection.
-
+    Diffusion model for learning LHCO jet distributiuons.
  
 '''
 
@@ -40,7 +36,7 @@ torch.set_default_dtype(torch.float64)
 
 params = argparse.ArgumentParser(description='arguments for the flow model')
 
-params.add_argument('--device',          default='cuda:0',            help='where to train')
+params.add_argument('--device',          default='cuda:1',            help='where to train')
 params.add_argument('--dim',             default=8,                   help='dim of data: (pT1,eta1,phi1,m1,pT2,eta2,phi2,m2)', type=int)
 params.add_argument('--mass_window',     default=(0,3300,3700,13000), help='bump hunt mass window: SB1, SR, SB2', type=tuple)
 
@@ -48,7 +44,7 @@ params.add_argument('--mass_window',     default=(0,3300,3700,13000), help='bump
 
 params.add_argument('--sde',             default='VariancePreservingSDE',    help='dynamics: VarianceExplodingSDE, VariancePreservingSDE', type=str)
 params.add_argument('--num_time_steps',  default=500,                        help='number of time steps' , type=int)
-params.add_argument('--num_gen',         default=10000,                      help='number of samples from model', type=int)
+params.add_argument('--num_gen',         default=100000,                      help='number of samples from model', type=int)
 params.add_argument('--sig_to_noise',    default=0.15,                       help='signal to noise ratio', type=float)
 
 #...score params:
@@ -61,7 +57,7 @@ params.add_argument('--num_layers',      default=5,                  help='numbe
 #...training params:
 
 params.add_argument('--batch_size',    default=1024,         help='size of training/testing batch', type=int)
-params.add_argument('--max_epochs',    default=20 ,          help='max num of training epochs', type=int)
+params.add_argument('--max_epochs',    default=1000,         help='max num of training epochs', type=int)
 params.add_argument('--max_patience',  default=20,           help='terminate if test loss is not changing', type=int)
 params.add_argument('--num_steps',     default=0,            help='split batch into n_steps sub-batches + gradient accumulation', type=int)
 params.add_argument('--test_size',     default=0.2,          help='fraction of testing data', type=float)
@@ -69,6 +65,7 @@ params.add_argument('--lr',            default=0.0001,       help='learning rate
 params.add_argument('--seed',          default=999,          help='random seed for data split', type=int)
 
 ####################################################################################################################
+
 
 if __name__ == '__main__':
 

@@ -10,8 +10,7 @@ class SDE(abc.ABC):
 	"""SDE abstract class."""
 
 	def __init__(self, args):
-		"""Construct an SDE.
-		"""
+		"""Construct an SDE."""
 		super().__init__()
 		self.args = args
 		self.N = args.num_time_steps
@@ -24,30 +23,24 @@ class SDE(abc.ABC):
 	def T(self):
 		"""End time of the SDE."""
 		pass
-
 	@abc.abstractmethod
 	def sde(self, x, t):
 		pass
-
 	@abc.abstractmethod
 	def backward_sde(self, x, t, score):
 		pass
-
 	@abc.abstractmethod
 	def marginal_prob(self, x, t):
 		"""Parameters to determine the marginal distribution (perturbation kernel) of the SDE, $p_0t(x(t)|x(0))$."""
 		pass
-
 	@abc.abstractmethod
 	def prior_sampling(self, shape):
 		"""Generate one sample from the prior distribution, $p_T(x)$."""
 		pass
-
 	@abc.abstractmethod
 	def sampler(self, score, eps):
 		"""Generate samples from model with predictor-corrector sampler."""
 		pass
-
 
 
 class VariancePreservingSDE(SDE):
@@ -90,11 +83,16 @@ class VariancePreservingSDE(SDE):
 	@torch.no_grad()
 	def sampler(self, 
 				score,
-				num_gen, 
+				num_gen,
+				num_corrector_steps, 
 				eps=1e-3):
 
-		predictor = EulerMaruyamaPredictor(sde=self.sde, num_time_steps=self.N)
-		corrector = LangevinCorrector(sde=self.sde, score=score, snr=self.snr, m_corrector_steps=50, variance_preserving=True)
+		def alpha_fn(t, M=num_corrector_steps):
+			timestep = (t * (M - 1) / self.T).long()	
+			return self.alphas.to(t.device)[timestep]
+
+		predictor = EulerMaruyamaPredictor(rsde=self.backward_sde, score=score, N=self.N)
+		corrector = LangevinCorrector(alpha_fn=alpha_fn, score=score, M=num_corrector_steps, snr=self.snr)
 		x = self.prior_sampling((num_gen, self.dim))
 		timesteps = torch.linspace(self.T, eps, self.N, device=self.device)
 
@@ -130,7 +128,6 @@ class VarianceExplodingSDE(SDE):
 		drift = drift - diffusion ** 2 * score(x, t) 
 		return drift, diffusion
 
-
 	def marginal_prob(self, x, t):
 		mean = x
 		std = self.sigma_min * (self.sigma_max / self.sigma_min)**t 
@@ -139,15 +136,18 @@ class VarianceExplodingSDE(SDE):
 	def prior_sampling(self, shape):
 		return torch.randn(*shape, device=self.device)
 
-
 	@torch.no_grad()
 	def sampler(self, 
 				score,
-				num_gen, 
+				num_gen,
+				num_corrector_steps, 
 				eps=1e-5):
 
-		predictor = EulerMaruyamaPredictor(sde=self.sde, num_time_steps=self.N)
-		corrector = LangevinCorrector(sde=self.sde, score=score, snr=self.snr, m_corrector_steps=50, variance_preserving=False)
+		def alpha_fn(t):
+			return torch.ones_like(t)
+
+		predictor = EulerMaruyamaPredictor(rsde=self.backward_sde, score=score, N=self.N)
+		corrector = LangevinCorrector(alpha_fn=alpha_fn, score=score, M=num_corrector_steps, snr=self.snr)
 		x = self.prior_sampling((num_gen, self.dim))
 		timesteps = torch.linspace(self.T, eps, self.N, device=self.device)
 
@@ -156,44 +156,6 @@ class VarianceExplodingSDE(SDE):
 			x = corrector.update(x, t)
 			x = predictor.update(x, t)
 		return x
-
-
-	# def sampler(self, 
-	# 			score_model, 
-	# 			eps=1e-3,
-	# 			num_samples=None,
-	# 			context=None):
-
-	# 	if not num_samples: num_samples = args.num_gen
-
-	# 	t = torch.ones(num_samples, device=self.device)
-	# 	mean, std = self.marginal_prob(t)
-
-	# 	init_x = self.prior_sampling((num_samples, self.dim)) * std
-	# 	time_steps = np.linspace(self.T, eps, self.N)
-	# 	step_size = time_steps[0] - time_steps[1]
-	# 	x = init_x
-
-	# 	for time_step in tqdm(time_steps, desc=' predictor-corrector sampling'):   
-
-	# 		batch_time_step = torch.ones(num_samples, device=self.device) * time_step
-			
-	# 		# Corrector step (Langevin MCMC)
-	# 		grad = score_model(x, batch_time_step)
-	# 		grad_norm = torch.norm(grad.reshape(grad.shape[0], -1), dim=-1).mean()
-	# 		noise_norm = np.sqrt(np.prod(x.shape[1:]))
-	# 		langevin_step_size = 2 * (self.snr * noise_norm / grad_norm)**2
-	# 		x = x + langevin_step_size * grad + torch.sqrt(2 * langevin_step_size) * torch.randn_like(x)      
-
-	# 		# Predictor step (Euler-Maruyama)
-	# 		_ , g = self.sde(batch_time_step)
-	# 		x_mean = x + (g**2) * score_model(x, batch_time_step) * step_size
-	# 		x = x_mean + torch.sqrt(g**2 * step_size) * torch.randn_like(x)      
-			
-	# 		# The last step does not include any noise
-	# 		return x_mean
-
-
 
 
 

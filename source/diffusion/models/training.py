@@ -36,7 +36,7 @@ class Model:
 		return test.best_model
 
 	@torch.no_grad()
-	def sample(self, num_samples=1000, num_batches=1):
+	def sample(self, num_samples=1000, num_batches=1, num_corrector_steps=1):
 		self.model.eval()
 		print("INFO: generating {} jets from model".format(num_samples))
 		n, r = divmod(num_samples, num_batches)
@@ -45,7 +45,7 @@ class Model:
 		samples=[]
 		for i in range(num_batches):
 			num = num_samples[i]
-			batch_sample = self.sde.sampler(score=self.model, num_gen=num)
+			batch_sample = self.sde.sampler(score=self.model, num_gen=num, num_corrector_steps=num_corrector_steps)
 			samples.append(batch_sample.cpu().detach())
 		samples = torch.squeeze(torch.cat(samples, dim=0), 1)
 		return samples

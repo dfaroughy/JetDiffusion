@@ -23,6 +23,14 @@ from diffusion.models.loss import denoising_loss
 sys.path.append("../")
 torch.set_default_dtype(torch.float64)
 
+'''
+    Description:
+
+    Predictor-Corrector sampler for Diffusion model 
+
+ 
+'''
+
 #########################################
 
 params = argparse.ArgumentParser()
@@ -34,28 +42,26 @@ if __name__ == '__main__':
 
     #...get model params
     args = params.parse_args()
-    make_dir(args.dir+'/plots', overwrite=True)
+    plot_dir = make_dir(args.dir+'/plots', overwrite=False)
     with open(args.dir + '/inputs.json', 'r') as f: model_inputs = json.load(f)
     args = argparse.Namespace(**model_inputs)
-
-    args.num_time_steps=500
-
 
     #...get datasets
 
     file =  "./data/events_anomalydetection_v2.features_with_jet_constituents.h5"
     data = torch.tensor(pd.read_hdf(file).to_numpy())
     bckg = torch.cat((data[:, :4], data[:, 7:11], data[:, -2:]), dim=1)  # d=9: (jet1, jet2, mjj, truth_label)
-    bckg = shuffle(bckg)
+    bckg = shuffle(bckg)[:args.num_gen]
 
     #...get SB events and preprocess data
 
     bckg = EventTransform(bckg, args)
-    # bckg.compute_mjj()
+    bckg.compute_mjj()
 
     #...define template model
 
-    sde = VarianceExplodingSDE(args)
+    if 'Exploding' in args.sde: sde = VarianceExplodingSDE(args)
+    if 'Preserving' in args.sde: sde = VariancePreservingSDE(args)
     score = ScoreNet(args, marginal_prob=sde.marginal_prob)
     model = Model(score, sde, args) 
 
@@ -63,9 +69,10 @@ if __name__ == '__main__':
 
     model.load_state(path=args.workdir+'/best_score_model.pth')
 
-    #...define template model
+    #...sample from model
 
-    sample = model.sample(num_samples=bckg.num_jets, num_batches=10)
+    sample = model.sample(num_samples=args.num_gen, num_corrector_steps=1, num_batches=10)
+
     sample = torch.cat((sample, torch.zeros(sample.shape[0],1)), dim=1)
     sample = EventTransform(sample, args, convert_to_ptepm=False)
     sample.mean = torch.tensor(args.mean)
@@ -75,8 +82,7 @@ if __name__ == '__main__':
     sample.preprocess(reverse=True)
     sample.compute_mjj()
 
-    jet_plot_routine((sample.data, bckg.data), 
-                     title='jet features generated SR ', save_dir=args.workdir+'/plots')
+    jet_plot_routine((sample.data, bckg.data), title='jet features generated', save_dir=plot_dir)
 
 
 
