@@ -93,19 +93,16 @@ class VariancePreservingSDE(SDE):
 				num_gen, 
 				eps=1e-3):
 
-		predictor = EulerMaruyamaPredictor(sde=self.sde, n_steps=self.N)
-		corrector = LangevinCorrector(sde=self.sde, score=score, n_steps=1, snr=self.snr, variance_preserving=True)
-		
-		#...Initial sample
+		predictor = EulerMaruyamaPredictor(sde=self.sde, num_time_steps=self.N)
+		corrector = LangevinCorrector(sde=self.sde, score=score, snr=self.snr, m_corrector_steps=50, variance_preserving=True)
 		x = self.prior_sampling((num_gen, self.dim))
 		timesteps = torch.linspace(self.T, eps, self.N, device=self.device)
 
 		for i in tqdm(range(self.N), desc=" PC sampling"):
 			t = torch.ones(num_gen, device=self.device) * timesteps[i]
-			x, _ = corrector.update(x, t)
-			x, mean = predictor.update(x, t)
-
-		return mean
+			x = corrector.update(x, t)
+			x = predictor.update(x, t)
+		return x
 
 
 class VarianceExplodingSDE(SDE):
@@ -149,19 +146,16 @@ class VarianceExplodingSDE(SDE):
 				num_gen, 
 				eps=1e-5):
 
-		predictor = EulerMaruyamaPredictor(sde=self.sde, n_steps=self.N)
-		corrector = LangevinCorrector(sde=self.sde, score=score, n_steps=1, snr=self.snr, variance_preserving=False)
-		
-		#...Initial sample
+		predictor = EulerMaruyamaPredictor(sde=self.sde, num_time_steps=self.N)
+		corrector = LangevinCorrector(sde=self.sde, score=score, snr=self.snr, m_corrector_steps=50, variance_preserving=False)
 		x = self.prior_sampling((num_gen, self.dim))
 		timesteps = torch.linspace(self.T, eps, self.N, device=self.device)
 
 		for i in tqdm(range(self.N), desc=" PC sampling"):
 			t = torch.ones(num_gen, device=self.device) * timesteps[i]
-			x, _ = corrector.update(x, t)
-			x, mean = predictor.update(x, t)
-
-		return mean
+			x = corrector.update(x, t)
+			x = predictor.update(x, t)
+		return x
 
 
 	# def sampler(self, 

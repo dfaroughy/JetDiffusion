@@ -7,79 +7,62 @@ from tqdm.auto import tqdm
 
 class Predictor(abc.ABC):
 	"""The abstract class for a predictor algorithm."""
-	def __init__(self, sde, n_steps):
+	def __init__(self, sde, num_time_steps):
 		super().__init__()
 		self.sde = sde
-		self.n_steps = n_steps
+		self.num_time_steps = num_time_steps
 
 	@abc.abstractmethod
 	def update(self, x, t):
-		"""One update of the predictor.
-		Args:
-		  x: A PyTorch tensor representing the current state
-		  t: A Pytorch tensor representing the current time step.
-		Returns:
-		  x: A PyTorch tensor of the next state.
-		  x_mean: A PyTorch tensor. The next state without random noise. Useful for denoising.
-		"""
+		"""One update of the predictor"""
 		pass
-
 
 class Corrector(abc.ABC):
 	"""The abstract class for a corrector algorithm."""
-	def __init__(self, sde, score, n_steps, snr, variance_preserving):
+	def __init__(self, sde, score, m_corrector_steps, snr, variance_preserving):
 		super().__init__()
 		self.sde = sde
 		self.score = score
-		self.n_steps = n_steps
+		self.m_corrector_steps = m_corrector_steps
 		self.snr = snr
 		self.variance_preserving = variance_preserving
 
 	@abc.abstractmethod
 	def update(self, x, t):
-		"""One update of the corrector.
-		Args:
-		  x: A PyTorch tensor representing the current state
-		  t: A PyTorch tensor representing the current time step.
-		Returns:
-		  x: A PyTorch tensor of the next state.
-		  x_mean: A PyTorch tensor. The next state without random noise. Useful for denoising.
-		"""
+		"""One update of the corrector"""
 		pass
 
 
 class EulerMaruyamaPredictor(Predictor):
 
-	def __init__(self, sde,  n_steps):
-		super().__init__(sde, n_steps)
+	def __init__(self, sde,  num_time_steps, denoise_last_step=False):
+		super().__init__(sde, num_time_steps)
+		self.denoise = denoise_last_step
 
 	def update(self, x, t):
-		dt = -1. / self.n_steps
-		z = torch.randn_like(x)
+		dt = -1. / self.num_time_steps
 		drift, diffusion = self.sde(x, t)
-		mean = x + drift * dt
-		x = mean + diffusion * np.sqrt(-dt) * z
-		return x, mean
+		x_mean = x + drift * dt
+		if self.denoise: 
+			x_mean = x_mean + diffusion * torch.randn_like(x) * np.sqrt(-dt)
+		return x_mean
 
 class LangevinCorrector(Corrector):
-	def __init__(self, sde, score, n_steps, snr, variance_preserving):
-		super().__init__(sde, score, n_steps, snr, variance_preserving)
+
+	'''Algorithm 4,5 in 20011.13456'''
+
+	def __init__(self, sde, score, m_corrector_steps, snr, variance_preserving):
+		super().__init__(sde, score, m_corrector_steps, snr, variance_preserving)
 
 	def update(self, x, t):
-		sde = self.sde
-		score = self.score
-		n_steps = self.n_steps
-		target_snr = self.snr	
-		timestep = (t * (n_steps - 1) / 1.0).long()
-		alpha = sde.alphas.to(t.device)[timestep] if self.variance_preserving else torch.ones_like(t)
+		timestep = (t * (self.m_corrector_steps - 1) / 1.0).long()
+		alpha = self.sde.alphas.to(t.device)[timestep] if self.variance_preserving else torch.ones_like(t)
 
-		for i in range(n_steps):
-			grad = score(x, t)
-			noise = torch.randn_like(x)
-			grad_norm = torch.norm(grad.reshape(grad.shape[0], -1), dim=-1).mean()
-			noise_norm = torch.norm(noise.reshape(noise.shape[0], -1), dim=-1).mean()
-			step_size = (target_snr * noise_norm / grad_norm) ** 2 * 2 * alpha
-			mean = x + step_size[:, None] * grad
-			x = mean + torch.sqrt(step_size * 2)[:, None] * noise
+		for i in range(self.m_corrector_steps):
+			g, z = self.score(x, t), torch.randn_like(x)
+			g_norm = torch.norm(g.reshape(g.shape[0], -1), dim=-1).mean()
+			z_norm = torch.norm(z.reshape(z.shape[0], -1), dim=-1).mean()
+			epsilon = 2 * alpha * (self.snr * z_norm / g_norm)**2 
+			x_mean = x + g * epsilon[:, None]  + z * torch.sqrt(2*epsilon[:, None])
 
-		return x, mean
+		return x_mean
