@@ -17,7 +17,7 @@ from diffusion.data.plots import jet_plot_routine
 
 from diffusion.models.training import Model
 from diffusion.models.diffusion.deep_architectures import ScoreNet
-from diffusion.models.diffusion.dynamics import driftlessSDE
+from diffusion.models.diffusion.dynamics import VariancePreservingSDE, VarianceExplodingSDE
 from diffusion.models.loss import denoising_loss
 
 sys.path.append("../")
@@ -38,7 +38,7 @@ if __name__ == '__main__':
     with open(args.dir + '/inputs.json', 'r') as f: model_inputs = json.load(f)
     args = argparse.Namespace(**model_inputs)
 
-    args.num_time_steps=1000
+    args.num_time_steps=500
 
 
     #...get datasets
@@ -55,7 +55,7 @@ if __name__ == '__main__':
 
     #...define template model
 
-    sde = driftlessSDE(args)
+    sde = VarianceExplodingSDE(args)
     score = ScoreNet(args, marginal_prob=sde.marginal_prob)
     model = Model(score, sde, args) 
 

@@ -24,7 +24,7 @@ class ScoreNet(nn.Module):
             dim_hidden: The dimensionality of Gaussian random feature embeddings.
         """
         super().__init__()
-
+        self.sde = args.sde
         dim_embed = args.dim_embedding
         dim_hidden = args.dim_hidden
         dim_input = args.dim
@@ -71,8 +71,10 @@ class ScoreNet(nn.Module):
         xt = torch.cat((x, time), dim=1)
         h = self.dense(xt)
         score = self.dense_last(xt+h)
-        _, std = self.marginal_prob(t)
-        return score / std
+        if 'Exploding' in self.sde:    
+            _, std = self.marginal_prob(x, t)
+            score = score / std
+        return score
 
 
 

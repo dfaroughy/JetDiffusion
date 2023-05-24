@@ -17,7 +17,7 @@ from diffusion.data.plots import jet_plot_routine
 
 from diffusion.models.training import Model
 from diffusion.models.diffusion.deep_architectures import ScoreNet
-from diffusion.models.diffusion.dynamics import driftlessSDE
+from diffusion.models.diffusion.dynamics import VarianceExplodingSDE, VariancePreservingSDE
 from diffusion.models.loss import denoising_loss
 
 
@@ -46,11 +46,10 @@ params.add_argument('--mass_window',     default=(0,3300,3700,13000), help='bump
 
 #...SDE params:
 
-params.add_argument('--sde',             default='driftless',        help='type of dynamics: driftless, VPSDE, VESDE, sunVPSDE', type=str)
-params.add_argument('--num_time_steps',  default=1000,               help='number of time steps' , type=int)
-params.add_argument('--sigma',           default=0.75,               help='diffusion sigma' , type=float)
-params.add_argument('--num_gen',         default=1000,               help='number of samples from model', type=int)
-params.add_argument('--R_sig_to_noise',  default=0.15,               help='signal to noise ratio', type=float)
+params.add_argument('--sde',             default='VariancePreservingSDE',    help='dynamics: VarianceExplodingSDE, VariancePreservingSDE', type=str)
+params.add_argument('--num_time_steps',  default=500,                        help='number of time steps' , type=int)
+params.add_argument('--num_gen',         default=10000,                      help='number of samples from model', type=int)
+params.add_argument('--sig_to_noise',    default=0.15,                       help='signal to noise ratio', type=float)
 
 #...score params:
 params.add_argument('--loss',            default=denoising_loss,     help='loss function')
@@ -62,7 +61,7 @@ params.add_argument('--num_layers',      default=5,                  help='numbe
 #...training params:
 
 params.add_argument('--batch_size',    default=1024,         help='size of training/testing batch', type=int)
-params.add_argument('--max_epochs',    default=10 ,          help='max num of training epochs', type=int)
+params.add_argument('--max_epochs',    default=20 ,          help='max num of training epochs', type=int)
 params.add_argument('--max_patience',  default=20,           help='terminate if test loss is not changing', type=int)
 params.add_argument('--num_steps',     default=0,            help='split batch into n_steps sub-batches + gradient accumulation', type=int)
 params.add_argument('--test_size',     default=0.2,          help='fraction of testing data', type=float)
@@ -76,7 +75,7 @@ if __name__ == '__main__':
     #...create working folders 
 
     args = params.parse_args()
-    args.workdir = make_dir('Results_dijet_density', overwrite=False)
+    args.workdir = make_dir('Results_{}'.format(args.sde), overwrite=False)
 
     #...get datasets
 
@@ -104,9 +103,11 @@ if __name__ == '__main__':
 
     train, test  = train_test_split(side_bands.data, test_size=args.test_size, random_state=args.seed)
 
-    # #...define model
+    # #...define models
 
-    sde = driftlessSDE(args)
+    if 'Exploding' in args.sde: sde = VarianceExplodingSDE(args)
+    if 'Preserving' in args.sde: sde = VariancePreservingSDE(args)
+
     score = ScoreNet(args, marginal_prob=sde.marginal_prob)
     model = Model(score, sde, args) 
 

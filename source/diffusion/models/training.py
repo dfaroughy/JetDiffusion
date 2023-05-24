@@ -45,7 +45,7 @@ class Model:
 		samples=[]
 		for i in range(num_batches):
 			num = num_samples[i]
-			batch_sample = self.sde.sampler(self.model, num_samples=num)
+			batch_sample = self.sde.sampler(score=self.model, num_gen=num)
 			samples.append(batch_sample.cpu().detach())
 		samples = torch.squeeze(torch.cat(samples, dim=0), 1)
 		return samples

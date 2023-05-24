@@ -4,7 +4,9 @@ import numpy as np
 import abc
 from tqdm.auto import tqdm
 
-class Foward_SDE(abc.ABC):
+from diffusion.models.diffusion.sampler import EulerMaruyamaPredictor, LangevinCorrector
+
+class SDE(abc.ABC):
 	"""SDE abstract class."""
 
 	def __init__(self, args):
@@ -12,6 +14,10 @@ class Foward_SDE(abc.ABC):
 		"""
 		super().__init__()
 		self.args = args
+		self.N = args.num_time_steps
+		self.device = args.device
+		self.dim = args.dim
+		self.snr = args.sig_to_noise
 
 	@property
 	@abc.abstractmethod
@@ -24,8 +30,12 @@ class Foward_SDE(abc.ABC):
 		pass
 
 	@abc.abstractmethod
+	def backward_sde(self, x, t, score):
+		pass
+
+	@abc.abstractmethod
 	def marginal_prob(self, x, t):
-		"""Parameters to determine the marginal distribution of the SDE, $p_t(x)$."""
+		"""Parameters to determine the marginal distribution (perturbation kernel) of the SDE, $p_0t(x(t)|x(0))$."""
 		pass
 
 	@abc.abstractmethod
@@ -34,134 +44,160 @@ class Foward_SDE(abc.ABC):
 		pass
 
 	@abc.abstractmethod
-	def sampler(self, score_model, eps, context):
+	def sampler(self, score, eps):
 		"""Generate samples from model with predictor-corrector sampler."""
 		pass
 
 
-	# def discretize(self, x, t):
-	# 	"""Discretize the SDE in the form: x_{i+1} = x_i + f_i(x_i) + G_i z_i.
-	# 	"""
-	# 	dt = 1 / self.num_steps
-	# 	drift, diffusion = self.sde(x, t)
-	# 	f = drift * dt
-	# 	G = diffusion * torch.sqrt(torch.tensor(dt))
-	# 	return f, G
 
-	# def reverse(self, score, probability_flow=False):
-	# 	"""Create the reverse-time SDE/ODE.
-	# 	"""
-	# 	num_steps = self.num_steps
-	# 	T = self.T
-	# 	sde_fwd = self.sde
-	# 	discretization = self.discretize
+class VariancePreservingSDE(SDE):
 
-	# 	# Build the class for reverse-time SDE.
-	# 	class Backward_SDE(self.__class__):
-	# 		def __init__(self):
-	# 		self.num_steps = num_steps
-	# 		self.probability_flow = probability_flow
-
-	# 		@property
-	# 		def T(self):
-	# 			return T
-
-	# 		def sde(self, x, t):
-	# 			"""Create the drift and diffusion functions for the reverse SDE/ODE."""
-	# 			drift, diffusion = sde_fwd(x, t)
-	# 			drift = drift - diffusion[:, None] ** 2 * score(x, t) * (0.5 if self.probability_flow else 1.)
-	# 			# Set the diffusion function to zero for ODEs.
-	# 			diffusion = 0. if self.probability_flow else diffusion
-	# 			return drift, diffusion
-
-	# 		def discretize(self, x, t):
-	# 			"""Create discretized iteration rules for the reverse diffusion sampler."""
-	# 			f, G = discretization(x, t)
-	# 			rev_f = f - G[:, None]**2 * score(x, t) * (0.5 if self.probability_flow else 1.)
-	# 			rev_G = torch.zeros_like(G) if self.probability_flow else G
-	# 			return rev_f, rev_G
-
-	# 	return Backward_SDE()
-
-
-class driftlessSDE(Foward_SDE):
-
-	def __init__(self, args):
+	def __init__(self, args, beta_min=0.1, beta_max=20.):
 		super().__init__(args)
-
-		self.sigma = args.sigma
-		self.num_steps = args.num_time_steps
-		self.num_samples = args.num_gen
-		self.device = args.device
-		self.dim = args.dim
-		self.snr = args.R_sig_to_noise
+		self.beta_min = beta_min
+		self.beta_max = beta_max
+		self.discrete_betas = torch.linspace(self.beta_min / self.N, self.beta_max / self.N, self.N)
+		self.alphas = 1. - self.discrete_betas
+		self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+		self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
+		self.sqrt_1m_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod)
 
 	@property
 	def T(self):
 		return 1.0
 
-	def sde(self, t):
-		drift = None
-		diffusion = self.sigma**t
+	def sde(self, x, t):
+		beta_t = self.beta_min + t * (self.beta_max - self.beta_min)
+		drift = -0.5 * beta_t[:, None] * x
+		diffusion = torch.sqrt(beta_t[:, None])
+		return drift, diffusion 
+
+	def backward_sde(self, x, t, score):
+		"""Create the drift and diffusion functions for the reverse SDE/ODE."""
+		drift, diffusion = self.sde(x, t)
+		drift = drift - diffusion ** 2 * score(x, t) 
+		return drift, diffusion
+
+	def marginal_prob(self, x, t):
+		log_mean_coeff = -0.25 * t**2 * (self.beta_max - self.beta_min) - 0.5 * t * self.beta_min
+		mean = torch.exp(log_mean_coeff[:, None]) * x
+		std = torch.sqrt(1. - torch.exp(2. * log_mean_coeff[:, None]))
+		return mean, std
+
+	def prior_sampling(self, shape):
+		return torch.randn(*shape, device=self.device)
+
+	@torch.no_grad()
+	def sampler(self, 
+				score,
+				num_gen, 
+				eps=1e-3):
+
+		predictor = EulerMaruyamaPredictor(sde=self.sde, n_steps=self.N)
+		corrector = LangevinCorrector(sde=self.sde, score=score, n_steps=1, snr=self.snr, variance_preserving=True)
+		
+		#...Initial sample
+		x = self.prior_sampling((num_gen, self.dim))
+		timesteps = torch.linspace(self.T, eps, self.N, device=self.device)
+
+		for i in tqdm(range(self.N), desc=" PC sampling"):
+			t = torch.ones(num_gen, device=self.device) * timesteps[i]
+			x, _ = corrector.update(x, t)
+			x, mean = predictor.update(x, t)
+
+		return mean
+
+
+class VarianceExplodingSDE(SDE):
+
+	def __init__(self, args, beta_min=0.01, beta_max=50.):
+		super().__init__(args)
+
+		self.sigma_min = beta_min
+		self.sigma_max = beta_max
+		self.discrete_sigmas = torch.exp(torch.linspace(np.log(self.sigma_min), np.log(self.sigma_max), self.N))
+
+	@property
+	def T(self):
+		return 1.0
+
+	def sde(self, x, t):
+		sigma = self.sigma_min * (self.sigma_max / self.sigma_min)**t
+		drift = torch.zeros_like(x)
+		diffusion =  sigma * torch.sqrt(torch.tensor(2 * (np.log(self.sigma_max) - np.log(self.sigma_min))))
 		return drift, diffusion[:, None]
 
-	def marginal_prob(self, t):
-		mean = None
-		std = torch.sqrt((self.sigma**(2 * t) - 1.) / 2. / np.log(self.sigma))
+	def backward_sde(self, x, t, score):
+		"""Create the drift and diffusion functions for the reverse SDE/ODE."""
+		drift, diffusion = self.sde(x, t)
+		drift = drift - diffusion ** 2 * score(x, t) 
+		return drift, diffusion
+
+
+	def marginal_prob(self, x, t):
+		mean = x
+		std = self.sigma_min * (self.sigma_max / self.sigma_min)**t 
 		return mean, std[:, None]
 
 	def prior_sampling(self, shape):
 		return torch.randn(*shape, device=self.device)
 
+
+	@torch.no_grad()
 	def sampler(self, 
-				score_model, 
-				eps=1e-3,
-				num_samples=None,
-				context=None):
+				score,
+				num_gen, 
+				eps=1e-5):
 
-		"""Generate samples from score-based models with Predictor-Corrector method.
-
-		Args:
-			score_model: A PyTorch model that represents the time-dependent score-based model.
-			marginal_prob: A function that gives the standard deviation of the perturbation kernel.
-			diffusion_coeff: A function that gives the diffusion coefficient of the SDE.
-			num_samples: The number of samplers to generate by calling this function once.
-			num_steps: The number of sampling steps. 
-			Equivalent to the number of discretized time steps.    
-			device: 'cuda' for running on GPUs, and 'cpu' for running on CPUs.
-			eps: The smallest time step for numerical stability.
+		predictor = EulerMaruyamaPredictor(sde=self.sde, n_steps=self.N)
+		corrector = LangevinCorrector(sde=self.sde, score=score, n_steps=1, snr=self.snr, variance_preserving=False)
 		
-		Returns: 
-			Samples.
-		"""
+		#...Initial sample
+		x = self.prior_sampling((num_gen, self.dim))
+		timesteps = torch.linspace(self.T, eps, self.N, device=self.device)
 
-		if not num_samples: num_samples = self.num_samples
+		for i in tqdm(range(self.N), desc=" PC sampling"):
+			t = torch.ones(num_gen, device=self.device) * timesteps[i]
+			x, _ = corrector.update(x, t)
+			x, mean = predictor.update(x, t)
 
-		t = torch.ones(num_samples, device=self.device)
-		_ , std = self.marginal_prob(t)
-		init_x = self.prior_sampling((num_samples, self.dim)) * std
-		time_steps = np.linspace(self.T, eps, self.num_steps)
-		step_size = time_steps[0] - time_steps[1]
-		x = init_x
+		return mean
 
-		for time_step in tqdm(time_steps, desc=' predictor-corrector sampling'):   
 
-			batch_time_step = torch.ones(num_samples, device=self.device) * time_step
+	# def sampler(self, 
+	# 			score_model, 
+	# 			eps=1e-3,
+	# 			num_samples=None,
+	# 			context=None):
+
+	# 	if not num_samples: num_samples = args.num_gen
+
+	# 	t = torch.ones(num_samples, device=self.device)
+	# 	mean, std = self.marginal_prob(t)
+
+	# 	init_x = self.prior_sampling((num_samples, self.dim)) * std
+	# 	time_steps = np.linspace(self.T, eps, self.N)
+	# 	step_size = time_steps[0] - time_steps[1]
+	# 	x = init_x
+
+	# 	for time_step in tqdm(time_steps, desc=' predictor-corrector sampling'):   
+
+	# 		batch_time_step = torch.ones(num_samples, device=self.device) * time_step
 			
-			# Corrector step (Langevin MCMC)
-			grad = score_model(x, batch_time_step)
-			grad_norm = torch.norm(grad.reshape(grad.shape[0], -1), dim=-1).mean()
-			noise_norm = np.sqrt(np.prod(x.shape[1:]))
-			langevin_step_size = 2 * (self.snr * noise_norm / grad_norm)**2
-			x = x + langevin_step_size * grad + torch.sqrt(2 * langevin_step_size) * torch.randn_like(x)      
+	# 		# Corrector step (Langevin MCMC)
+	# 		grad = score_model(x, batch_time_step)
+	# 		grad_norm = torch.norm(grad.reshape(grad.shape[0], -1), dim=-1).mean()
+	# 		noise_norm = np.sqrt(np.prod(x.shape[1:]))
+	# 		langevin_step_size = 2 * (self.snr * noise_norm / grad_norm)**2
+	# 		x = x + langevin_step_size * grad + torch.sqrt(2 * langevin_step_size) * torch.randn_like(x)      
 
-			# Predictor step (Euler-Maruyama)
-			_ , g = self.sde(batch_time_step)
-			x_mean = x + (g**2) * score_model(x, batch_time_step) * step_size
-			x = x_mean + torch.sqrt(g**2 * step_size) * torch.randn_like(x)      
+	# 		# Predictor step (Euler-Maruyama)
+	# 		_ , g = self.sde(batch_time_step)
+	# 		x_mean = x + (g**2) * score_model(x, batch_time_step) * step_size
+	# 		x = x_mean + torch.sqrt(g**2 * step_size) * torch.randn_like(x)      
 			
-			# The last step does not include any noise
-			return x_mean
+	# 		# The last step does not include any noise
+	# 		return x_mean
 
 
 
