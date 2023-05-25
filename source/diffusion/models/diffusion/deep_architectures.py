@@ -1,28 +1,24 @@
 import torch
 import torch.nn as nn
+import torch.nn.utils.weight_norm as weight_norm
 import numpy as np
 
 class GaussianFourierProjection(nn.Module):
+
     def __init__(self, dim_embed, scale=16):
         super().__init__()
         half_dim = dim_embed // 2
         self.W = nn.Parameter(torch.randn(half_dim) * scale, requires_grad=False)
+
     def forward(self, t):
         W = self.W.to(t.device)
         t_proj = t[:, None] * W[None, :] * 2 * np.pi
         return torch.cat([torch.sin(t_proj), torch.cos(t_proj)], dim=-1)
 
 class ScoreNet(nn.Module):
-    """A time-dependent score-based model built upon a simplified architecture."""
 
     def __init__(self, args, marginal_prob):
-        """Initialize a time-dependent score-based network.
-
-        Args:
-            marginal_prob_std: A function that takes time t and gives the standard
-                deviation of the perturbation kernel p_{0t}(x(t) | x(0)).
-            dim_hidden: The dimensionality of Gaussian random feature embeddings.
-        """
+        """time-dependent score-based network."""
         super().__init__()
         self.sde = args.sde
         dim_embed = args.dim_embedding
@@ -51,19 +47,40 @@ class ScoreNet(nn.Module):
         if kind=='MLP':
             
             dims = 2 * dim_hidden
+
             self.dense = MLP(dim_in=dims, 
                              hidden_layers=[dims]*num_layers, 
                              dim_out=dims,
                              activation='LeakyReLU',
-                             final_activation='LeakyReLU'
-                              ).to(args.device)
+                             final_activation='LeakyReLU',
+                             device = args.device
+                              )
 
-        self.dense_last = MLP(dim_in=2*dim_hidden, 
-                         hidden_layers=[2 * dim_hidden], 
-                         dim_out=dim_input,
-                         activation='LeakyReLU',
-                         final_activation=None
-                        ).to(args.device)
+            self.dense_last = MLP(dim_in=dims, 
+                                  hidden_layers=[dims], 
+                                  dim_out=dim_input,
+                                  activation='LeakyReLU',
+                                  final_activation=None,
+                                  device = args.device
+                                  )
+
+        if kind=='Attention':
+
+            dims = 2 * dim_hidden
+            
+            self.dense = SelfAttention(dim_in=dims, 
+                                       dim_hidden=dims, 
+                                       dim_out=dims, 
+                                       num_heads=1, 
+                                       num_transformer=num_layers,                                
+                                       device = args.device)
+
+            self.dense_last = MLP(dim_in=dims, 
+                                 hidden_layers=[dims], 
+                                 dim_out=dim_input,
+                                 activation='GELU',
+                                 final_activation=None,
+                                 device = args.device)
 
     def forward(self, x, t):
         time = self.time_embedding(self.projection(t))
@@ -72,40 +89,10 @@ class ScoreNet(nn.Module):
         h = self.dense(xt)
         score = self.dense_last(xt+h)
         if 'Exploding' in self.sde:    
-            _, std = self.marginal_prob(x, t)
+            _ , std = self.marginal_prob(x, t)
             score = score / std
         return score
 
-
-
-# class SelfAttentionRatioEstimatorPerTime(DynamicRatioEstimator):
-#     name_="dynamic_ratio_estimator_self_attention"
-#     def __init__(self, **kwargs):
-#         super(SelfAttentionRatioEstimatorPerTime, self).__init__(**kwargs)
-
-#         self.number_of_spins = kwargs.get("number_of_spins")
-#         self.hidden_1 = kwargs.get("hidden_1")
-#         self.time_embedding_dim = kwargs.get("time_embedding_dim", 10)
-#         self.num_heads = kwargs.get("num_heads", 2)
-
-#         self.self_attention = SelfAttention(self.number_of_spins, [self.hidden_1], self.hidden_1, self.num_heads)
-#         self.f = nn.Linear(self.hidden_1+self.time_embedding_dim,self.number_of_spins)
-
-#     def forward_states_and_times(self, states, times):
-#         time_embbedings = get_timestep_embedding(times.squeeze(),
-#                                                  time_embedding_dim=self.time_embedding_dim)
-
-#         step_attn = self.self_attention(states, dim=1)
-#         step_two = torch.concat([step_attn, time_embbedings],dim=1)
-#         ratio_estimator = self.f(step_two)
-        
-#         return softplus(ratio_estimator)
-
-#     @classmethod
-#     def get_parameters(self) -> dict:
-#         kwargs = super().get_parameters()
-#         kwargs.update({"hidden_1": 14, "num_heads": 2})
-#         return kwargs
 
 
 class MLP(nn.Module):
@@ -119,11 +106,10 @@ class MLP(nn.Module):
 
     """
     def __init__(self, dim_in, hidden_layers, dim_out, activation='LeakyReLU',
-                 final_activation=None, wrapper_func=None, **kwargs):
+                 final_activation=None, wrapper_func=None, device='cpu', **kwargs):
         super().__init__()
 
-        if not wrapper_func:
-            wrapper_func = lambda x: x
+        if not wrapper_func: wrapper_func = lambda x: x
 
         hidden_layers = hidden_layers[:]
         hidden_layers.append(dim_out)
@@ -137,14 +123,14 @@ class MLP(nn.Module):
         if final_activation is not None:
             layers.append(getattr(nn, final_activation)())
 
-        self.net = nn.Sequential(*layers)
+        self.net = nn.Sequential(*layers).to(device)
 
     def forward(self, x, **kwargs):
         return self.net(x)
 
 
 
-class Attention(nn.Module):
+class SelfAttention(nn.Module):
 
     """
     Attention layer.
@@ -162,30 +148,19 @@ class Attention(nn.Module):
         num_heads (int, optional): Number of attention heads, must divide last element of `layers_dim`. Default: 1
     """
 
-    def __init__(self, dim_in, hidden_layers, dim_out, activation='LeakyReLU', final_activation=None, num_heads=1, **kwargs):
+    def __init__(self, dim_in, dim_hidden, dim_out, num_heads=1, num_transformer=4, device= 'cpu', **kwargs):
         super().__init__()
 
-        self.embedding_key = MLP(dim_in, hidden_layers, dim_out, activation, final_activation)
-        self.embedding_query = MLP(dim_in, hidden_layers, dim_out, activation, final_activation)
-        self.embedding_value = MLP(dim_in, hidden_layers, dim_out, activation, final_activation)
-        
+        self.embedding_key   = MLP(dim_in, [dim_hidden], dim_out, 'LeakyReLU', wrapper_func=weight_norm, device=device)
+        self.embedding_query = MLP(dim_in, [dim_hidden], dim_out, 'LeakyReLU', wrapper_func=weight_norm, device=device)
+        self.embedding_value = MLP(dim_in, [dim_hidden], dim_out, 'LeakyReLU', wrapper_func=weight_norm, device=device)
         self.num_heads = num_heads
+        self.num_transformer = num_transformer
+        self.dim_out = dim_out
+        self.device = device
 
-    def attention(self, Q, K, V):
+    def attention_block(self, Q, K, V):
 
-        """
-        Multihead attention layer.
-        "Attention Is All You Need" (https://arxiv.org/abs/1706.03762)
-
-        Args:
-            Q (tensor): Query matrix (..., N, D)
-            K (tensor): Key matrix (..., N, D)
-            V (tensor): Value matrix (..., N, D)
-            num_heads (int, optional): Number of attention heads, must divide D. Default: 1
-
-        Returns:
-            Attention (tensor): Result of multihead attention with shape (..., N, D)
-        """
         *query_shape, _ = Q.shape
         *value_shape, D = V.shape
 
@@ -199,19 +174,13 @@ class Attention(nn.Module):
 
         return A
 
-    def forward(self, Q, K, V, **kwargs):
+    def forward(self, x, **kwargs):
 
-        return self.attention(self.embedding_query(Q), 
-                              self.embedding_key(K), 
-                              self.embedding_value(V))
+        for _ in range(self.num_transformer):
+            h1 = self.attention_block(self.embedding_query(x), self.embedding_key(x), self.embedding_value(x))
+            h2 = h1 + x 
+            h3 = MLP(self.dim_out, [self.dim_out], self.dim_out, 'GELU', wrapper_func=weight_norm, device=self.device)(h2)
 
-
-class SelfAttention(Attention):
-
-    def __init__(self, dim_in, hidden_layers, dim_out, activation='LeakyReLU', final_activation=None, num_heads=1, **kwargs):
-        super().__init__(dim_in, hidden_layers, dim_out, activation, final_activation, num_heads)
-
-    def forward(self, X, **kwargs):
-        return super().forward(X, X, X)
+        return x + h3 
 
 

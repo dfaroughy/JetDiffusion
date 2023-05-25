@@ -125,7 +125,7 @@ class VarianceExplodingSDE(SDE):
 	def backward_sde(self, x, t, score):
 		"""Create the drift and diffusion functions for the reverse SDE/ODE."""
 		drift, diffusion = self.sde(x, t)
-		drift = drift - diffusion ** 2 * score(x, t) 
+		drift = drift - diffusion**2 * score(x, t) 
 		return drift, diffusion
 
 	def marginal_prob(self, x, t):
